@@ -1,0 +1,739 @@
+---
+title: "Air Pollutant Spatial Interpolation"
+output: html_notebook
+---
+
+# Library Loading
+```{r, warning=FALSE, verbose=FALSE, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(tidyr)
+library(sf)
+library(rgdal)
+library(sp)
+library(gstat)
+library(raster)
+library(ggplot2)
+library(leaflet)
+library(tmap)
+library(geojsonio)
+library(geojsonlint)
+library(lattice)
+library(gridExtra)
+```
+
+# Reading AQI Data
+```{r, verbose=FALSE, warning=FALSE, message=FALSE}
+# Reading AQI Data GeoJSON
+AQI <- readOGR("Data/2019AnnualConc/2019AnnualConc.geojson")
+States <- readOGR("Data/StateMerged/StateMerged.geojson")
+```
+
+```{r}
+categories_to_keep <- c("Ozone", "Nitrogen dioxide (NO2)", "PM2.5 - Local Conditions")
+AQI_filtered <- AQI[AQI$Parameter1 %in% categories_to_keep,]
+
+ozone_data <- AQI_filtered[AQI_filtered$Parameter1 == "Ozone",]
+no2_data <- AQI_filtered[AQI_filtered$Parameter1 == "Nitrogen dioxide (NO2)",]
+pm25_data <- AQI_filtered[AQI_filtered$Parameter1 == "PM2.5 - Local Conditions",]
+
+ozone_data_unique <- ozone_data[!duplicated(ozone_data@data[c("Latitude", "Longitude")]),]
+no2_data_unique <- no2_data[!duplicated(no2_data@data[c("Latitude", "Longitude")]),]
+pm25_data_unique <- pm25_data[!duplicated(pm25_data@data[c("Latitude", "Longitude")]),]
+```
+
+```{r}
+# Ozone Concentration Summary Statistics
+ozone_summary <- ozone_data_unique@data$Arithmetic %>%
+  summary()
+# NO2 Concentration Summary Statistics
+no2_summary <- no2_data_unique@data$Arithmetic %>%
+  summary()
+# PM 2.5 Concentration Summary Statistics
+pm25_summary <- pm25_data_unique@data$Arithmetic %>%
+  summary()
+
+ozone_summary; no2_summary; pm25_summary
+
+# Histograms of Air Pollutant Concentrations
+par(mfrow=c(1,3))
+hist(ozone_data_unique@data$Arithmetic, main="Ozone Concentration",
+     xlab = "Ozone Concentration Value (ppm)")
+hist(no2_data_unique@data$Arithmetic, main="Nitrogen dioxide Concentration",
+     xlab = "Nitrogen dioxide Concentration (ppm)")
+hist(pm25_data_unique@data$Arithmetic, main="PM 2.5 Concentration",
+     xlab = "PM 2.5 Concentration (μg/mᶟ)")
+```
+
+# Checking Projection
+```{r}
+proj4string(ozone_data_unique)
+proj4string(no2_data_unique)
+proj4string(pm25_data_unique)
+```
+# Counting Measurement Stations
+```{r}
+ozone_station_count <- ozone_data_unique@data %>%
+  distinct(Latitude, Longitude, .keep_all = TRUE) %>%
+  group_by(Latitude, Longitude) %>%
+  summarise(num_stations = n())
+
+nrow(ozone_station_count) #159 stations
+
+no2_station_count <- no2_data_unique@data %>%
+  distinct(Latitude, Longitude, .keep_all = TRUE) %>%
+  group_by(Latitude, Longitude) %>%
+  summarise(num_stations = n())
+
+nrow(no2_station_count) #79 stations
+
+pm25_station_count <- pm25_data_unique@data %>%
+  distinct(Latitude, Longitude, .keep_all = TRUE) %>%
+  group_by(Latitude, Longitude) %>%
+  summarise(num_stations = n())
+
+nrow(pm25_station_count) #94 stations
+
+```
+
+
+# IDW Spatial Interpolation - Location Plot with Points to be Predicted
+```{r}
+n_points <- 100
+predictions <- spsample(States, n_points, "random")
+
+par(mfrow=c(1,3))
+plot(ozone_data_unique)
+plot(predictions, add=TRUE, col = "RED")
+plot(no2_data_unique)
+plot(predictions, add=TRUE, col = "RED")
+plot(pm25_data_unique)
+plot(predictions, add=TRUE, col = "RED")
+```
+# IDW Spatial Interpolation - IDW Predicted Plots
+```{r}
+Ozonepred <- idw(Arithmetic ~ 1,
+            ozone_data_unique,
+            predictions,
+            idp = 2)
+
+NO2pred <- idw(Arithmetic ~ 1,
+            no2_data_unique,
+            predictions,
+            idp = 2)
+
+PM25pred <- idw(Arithmetic ~ 1,
+            pm25_data_unique,
+            predictions,
+            idp = 2)
+
+par(mfrow=c(1,3))
+SamplePlot1 <- spplot(Ozonepred, "var1.pred", main = "Ozone Pred. (k=2, n=100)",
+                      sp.layout = list(polygons(States)))
+SamplePlot2 <- spplot(NO2pred, "var1.pred", main = "NO2 Pred. (k=2, n=100)",
+                      sp.layout = list(polygons(States)))
+SamplePlot3 <- spplot(PM25pred, "var1.pred", main = "PM2.5 Pred. (k=2, n=100)",
+                      sp.layout = list(polygons(States)))
+
+grid.arrange(SamplePlot1, SamplePlot2, SamplePlot3, ncol = 3)
+```
+
+# Cross Validation
+```{r}
+LOOCV_Ozone <- krige.cv(Arithmetic ~ 1,
+                        ozone_data_unique,
+                        nfold = nrow(ozone_data_unique),
+                        set = list(idp = 2))
+
+LOOCV_Ozone@data
+
+LOOCV_NO2 <- krige.cv(Arithmetic ~ 1,
+                      no2_data_unique,
+                      nfold = nrow(no2_data_unique),
+                      set = list(idp = 2))
+
+LOOCV_NO2@data
+
+LOOCV_PM25 <- krige.cv(Arithmetic ~ 1,
+                       pm25_data_unique,
+                       nfold = nrow(pm25_data_unique),
+                       set = list(idp = 2))
+
+LOOCV_PM25@data
+```
+
+# LOOCV Residual Plot
+```{r}
+loocvOzonePlot <- spplot(LOOCV_Ozone, "residual", main="Ozone Resid (k=2, n=100)",
+                         sp.layout = list(polygons(States)))
+loocvNO2Plot <- spplot(LOOCV_NO2, "residual", main="NO2 Resid (k=2, n=100)",
+                       sp.layout = list(polygons(States)))
+loocvPM25Plot <- spplot(LOOCV_PM25, "residual", main="PM2.5 Resid (k=2, n=100)",
+                        sp.layout = list(polygons(States)))
+grid.arrange(loocvOzonePlot, loocvNO2Plot, loocvPM25Plot, ncol = 3)
+```
+
+# Measurement of Fit
+```{r}
+# RMSE of Air Pollutant LOOCV
+
+RMSE_resid <- function(x){
+  return(sqrt(mean(x^2)))
+}
+
+RMSE_resid(LOOCV_Ozone@data$residual) # RMSE.ozone: 0.003207004
+RMSE_resid(LOOCV_NO2@data$residual) # RMSE.no2: 7.546449
+RMSE_resid(LOOCV_PM25@data$residual) # RMSE.pm25: 1.703405
+
+# Generally, RMSE of Residuals lower than 1 indicates good agreement so 
+# the parameter k of NO2 has to be adjusted 
+```
+
+# Refitting with new exponent parameter k for IDW (k=3)
+```{r}
+# NO2.idw <- idw(Arithmetic ~ 1,no2_data_unique, predictions, idp=3)
+
+LOOCV_NO2_k3 <- krige.cv(Arithmetic ~ 1,
+                      no2_data_unique,
+                      nfold = nrow(no2_data_unique),
+                      set = list(idp = 3))
+
+LOOCV_NO2_k3@data
+
+LOOCV_PM25_k3 <- krige.cv(Arithmetic ~ 1,
+                       pm25_data_unique,
+                       nfold = nrow(pm25_data_unique),
+                       set = list(idp = 3))
+
+LOOCV_PM25_k3@data
+
+RMSE_resid(LOOCV_NO2_k3@data$residual) # RMSE.no2: 7.902865 (increased RMSE)
+RMSE_resid(LOOCV_PM25_k3@data$residual) # RMSE.pm25: 1.797648 (increased RMSE)
+```
+
+# Refitting with new exponent parameter k for IDW (k=1.5)
+```{r}
+LOOCV_NO2_k15 <- krige.cv(Arithmetic ~ 1,
+                      no2_data_unique,
+                      nfold = nrow(no2_data_unique),
+                      set = list(idp = 1.5))
+
+LOOCV_NO2_k15@data
+
+LOOCV_PM25_k15 <- krige.cv(Arithmetic ~ 1,
+                       pm25_data_unique,
+                       nfold = nrow(pm25_data_unique),
+                       set = list(idp = 1.5))
+
+LOOCV_PM25_k15@data
+
+RMSE_resid(LOOCV_NO2_k15@data$residual) # RMSE.no2: 7.356047 (decreased RMSE)
+RMSE_resid(LOOCV_PM25_k15@data$residual) # RMSE.pm25: 1.668088 (decreased RMSE)
+```
+
+# Refitting with new exponent parameter k for IDW (k=0.5)
+```{r}
+LOOCV_NO2_k.5 <- krige.cv(Arithmetic ~ 1,
+                      no2_data_unique,
+                      nfold = nrow(no2_data_unique),
+                      set = list(idp = 0.5))
+
+LOOCV_NO2_k15@data
+
+LOOCV_PM25_k.5 <- krige.cv(Arithmetic ~ 1,
+                       pm25_data_unique,
+                       nfold = nrow(pm25_data_unique),
+                       set = list(idp = 0.5))
+
+LOOCV_PM25_k.5@data
+
+RMSE_resid(LOOCV_NO2_k.5@data$residual) # RMSE.no2: 10.15379 (increased RMSE)
+RMSE_resid(LOOCV_PM25_k.5@data$residual) # RMSE.pm25: 1.876017 (increased RMSE)
+```
+
+# Refitting with new exponent parameter k for IDW (k=1)
+```{r}
+LOOCV_NO2_k1 <- krige.cv(Arithmetic ~ 1,
+                      no2_data_unique,
+                      nfold = nrow(no2_data_unique),
+                      set = list(idp = 1))
+
+LOOCV_NO2_k1@data
+
+LOOCV_PM25_k1 <- krige.cv(Arithmetic ~ 1,
+                       pm25_data_unique,
+                       nfold = nrow(pm25_data_unique),
+                       set = list(idp = 1))
+
+LOOCV_PM25_k1@data
+
+RMSE_resid(LOOCV_NO2_k1@data$residual) # RMSE.no2: 7.356047 (increased RMSE)
+RMSE_resid(LOOCV_PM25_k1@data$residual) # RMSE.pm25: 1.668088 (increased RMSE)
+```
+
+# Loop for parameter k
+```{r}
+# Looping parameter k LOOCV for Ozone Concentration Data IDW
+RMSE_values_ozone <- c()
+k_values <- seq(0, 5, by = 0.1)
+for (k in k_values) {
+  RMSE_values_ozone <- c(RMSE_values_ozone, RMSE_resid(krige.cv(Arithmetic ~ 1,
+                                                    ozone_data_unique,
+                                                    nfold = nrow(ozone_data_unique),
+                                                    set = list(idp = k))@data$residual))
+}
+plot(k_values, RMSE_values_ozone, type = "o", xlab = "k", ylab = "RMSE (for Ozone data)")
+
+min_RMSE_ozone <- min(RMSE_values_ozone)
+min_k_ozone <- k_values[which.min(RMSE_values_ozone)]
+text(min_k_ozone, min_RMSE_ozone,
+     paste0("k = ", min_k_ozone, "\nRMSE = ", round(min_RMSE_ozone, 2)), pos = 4, cex=0.5)
+
+
+
+# Looping parameter k LOOCV for NO2 Concentration Data IDW
+RMSE_values_no2 <- c()
+k_values <- seq(0, 5, by = 0.1)
+for (k in k_values) {
+  RMSE_values_no2 <- c(RMSE_values_no2, RMSE_resid(krige.cv(Arithmetic ~ 1,
+                                                    no2_data_unique,
+                                                    nfold = nrow(no2_data_unique),
+                                                    set = list(idp = k))@data$residual))
+}
+plot(k_values, RMSE_values_no2, type = "o", xlab = "k", ylab = "RMSE (for NO2 data)")
+
+min_RMSE_no2 <- min(RMSE_values_no2)
+min_k_no2 <- k_values[which.min(RMSE_values_no2)]
+text(min_k_no2, min_RMSE_no2,
+     paste0("k = ", min_k_no2, "\nRMSE = ", round(min_RMSE_no2, 2)), pos = 4, cex=0.5)
+
+
+# Looping parameter k LOOCV for PM2.5 Concentration Data IDW
+RMSE_values_pm25 <- c()
+k_values <- seq(0, 5, by = 0.1)
+for (k in k_values) {
+  RMSE_values_pm25 <- c(RMSE_values_pm25, RMSE_resid(krige.cv(Arithmetic ~ 1,
+                                                    pm25_data_unique,
+                                                    nfold = nrow(pm25_data_unique),
+                                                    set = list(idp = k))@data$residual))
+}
+plot(k_values, RMSE_values_pm25, type = "o", xlab = "k", ylab = "RMSE (for PM 2.5 data)")
+
+min_RMSE_pm25 <- min(RMSE_values_pm25)
+min_k_pm25 <- k_values[which.min(RMSE_values_pm25)]
+text(min_k_pm25, min_RMSE_pm25, 
+     paste0("k = ", min_k_pm25, "\nRMSE = ", round(min_RMSE_pm25, 2)), pos = 4, cex=0.5)
+```
+
+# IDW Model Parameter Selection for Each Pollutant
+```{r}
+# Ozone IDW Model Parameter and RMSE
+print(min_k_ozone)  # k = 1
+print(min_RMSE_ozone) # RMSE: 0.003045932
+
+# NO2 IDW Model Parameter and RMSE
+print(min_k_no2) # k = 1.3
+print(min_RMSE_no2) # RMSE: 7.326283
+
+# PM2.5 IDW Model Parameter and RMSE
+print(min_k_pm25) # k = 1.3
+print(min_RMSE_pm25) # RMSE: 1.665076
+```
+# IDW Spatially Interpolated Raster Map for Each Pollutant
+```{r}
+# Ozone dataset
+ozone_data_unique@data
+
+# NO2 dataset
+no2_data_unique@data
+
+# PM2.5 dataset
+pm25_data_unique@data
+
+k_ozone <- 1
+k_no2 <- 1.3
+k_pm25 <- 1.3
+```
+
+```{r}
+ozone_coords <- ozone_data_unique[, c("Longitude", "Latitude")]
+no2_coords <- no2_data_unique[, c("Longitude", "Latitude")]
+pm25_coords <- pm25_data_unique[, c("Longitude", "Latitude")]
+
+# Check for duplicated coordinates
+duplicated(ozone_coords@data)
+duplicated(no2_coords@data)
+duplicated(pm25_coords@data)
+```
+
+```{r}
+SampPoints <- spsample(x = States, n = 40000, type = "random")
+
+IDW_Ozone = gstat::idw(formula = Arithmetic ~ 1,
+                       locations = ozone_data_unique,
+                       newdata = SampPoints ,
+                       idp = 1)
+
+IDW_NO2 = gstat::idw(formula = Arithmetic ~ 1,
+                     locations = no2_data_unique,
+                     newdata = SampPoints ,
+                     idp = 1.3)
+
+IDW_PM25 = gstat::idw(formula = Arithmetic ~ 1,
+                      locations = pm25_data_unique,
+                      newdata = SampPoints,
+                      idp = 1.3)
+
+
+tmapOzone = tm_shape(IDW_Ozone) + 
+  tm_dots(col = "var1.pred", size = 0.05, title = "Predicted Concentration") + 
+  tm_shape(States) + 
+  tm_borders(col = "black", lwd=2) +
+  tm_layout(main.title = "IDW Spatial Interpolated 2019 Ozone Concentration",
+            main.title.position = "center",
+            legend.position = c("center","bottom"),
+            legend.outside = TRUE)
+
+tmapNO2 = tm_shape(IDW_NO2) + 
+  tm_dots(col = "var1.pred", size = 0.05, title = "Predicted Concentration") +
+  tm_shape(States) + 
+  tm_borders(col = "black", lwd=2) + 
+  tm_layout(main.title = "IDW Spatial Interpolated 2019 NO2 Concentration",
+            main.title.position = "center",
+            legend.position = c("center","bottom"),
+            legend.outside = TRUE)
+
+tmapPM25 = tm_shape(IDW_PM25) + 
+  tm_dots(col = "var1.pred", size = 0.05, title = "Predicted Concentration") +
+  tm_shape(States) + 
+  tm_borders(col = "black", lwd=2) + 
+  tm_layout(main.title = "IDW Spatial Interpolated 2019 PM 2.5 Concentration",
+            main.title.position = "center",
+            legend.position = c("center","bottom"),
+            legend.outside = TRUE)
+
+par(mfrow=c(1,3))
+tmapOzone; tmapNO2; tmapPM25
+```
+
+# Exporting the Data Cleaned Air Pollutants as GeoJSON for Clustering (in GeoDa)
+```{r}
+Ozone_States <- SpatialPolygonsDataFrame(States, data = data.frame(ozone_data_unique@data, row.names = row.names(ozone_data_unique)))
+NO2_States <- SpatialPolygonsDataFrame(States, data = data.frame(no2_data_unique@data, row.names = row.names(no2_data_unique)))
+PM25_States <- SpatialPolygonsDataFrame(States, data = data.frame(pm25_data_unique@data, row.names = row.names(pm25_data_unique)))
+
+OzoneGJ <- geojson_json(Ozone_States)
+NO2GJ <- geojson_json(NO2_States)
+PM25GJ <- geojson_json(PM25_States)
+
+write(OzoneGJ, file = "OzoneGJ.geojson")
+write(NO2GJ, file = "NO2GJ.geojson")
+write(PM25GJ, file = "PM25GJ.geojson")
+
+OzoneIDWGJ <- geojson_json(IDW_Ozone)
+write(OzoneIDWGJ, file = "OzoneIDWGJ.geojson")
+```
+
+# Air Pollutant Concentration over Longitude and Latitude grid
+```{r}
+ggplot(data = ozone_data_unique@data)+
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic),
+             color = "brown", alpha = 3/4) +
+  ggtitle("Ozone Concentration (ppm)") +
+  coord_fixed()
+
+ggplot(data = no2_data_unique@data)+
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic),
+             color = "purple", alpha = 3/4) +
+  ggtitle("Nitrogen dioxide Concentration (ppm)") +
+  coord_fixed()
+
+ggplot(data = pm25_data_unique@data)+
+  geom_point(mapping = aes(x = Longitude, y = Latitude, size = Arithmetic),
+             color = "navy", alpha = 3/4) +
+  ggtitle("PM2.5 Concentration (μg/mᶟ)") +
+  coord_fixed()
+```
+
+# Bounding Box
+```{r}
+bbox(ozone_data_unique)
+bbox(no2_data_unique)
+bbox(pm25_data_unique)
+```
+
+# Normality Assumption Checking 
+```{r}
+par(mfrow=c(1,3))
+hist(ozone_data_unique@data$Arithmetic, main="Ozone Concentration",
+     xlab = "Ozone Concentration Value (ppm)")
+hist(no2_data_unique@data$Arithmetic, main="Nitrogen dioxide Concentration",
+     xlab = "Nitrogen dioxide Concentration (ppm)")
+hist(pm25_data_unique@data$Arithmetic, main="PM 2.5 Concentration",
+     xlab = "PM 2.5 Concentration (μg/mᶟ)")
+```
+# Log-transformation of Air Pollutant Data
+```{r}
+# Log-transformation of Ozone Concentration Data
+ozone_data_unique@data$logArith <- log(ozone_data_unique@data$Arithmetic)
+
+# Log-transformation of Nitrogen dioxide Concentration Data
+no2_data_unique@data$logArith <- log(no2_data_unique@data$Arithmetic)
+
+# Histogram of Air Pollutant Concentration after necessary Log-transformation
+par(mfrow=c(1,3))
+hist(ozone_data_unique@data$logArith, main="Log(Ozone Concentration)",
+     xlab = "Log(Ozone Concentration)", cex.main = 1)
+hist(no2_data_unique@data$logArith, main="Log(Nitrogen dioxide Concentration)",
+     xlab = "Log(Nitrogen dioxide Concentration)", cex.main = 1)
+hist(pm25_data_unique@data$Arithmetic, main="PM 2.5 Concentration",
+     xlab = "PM 2.5 Concentration (μg/mᶟ)")
+
+# All passes Normality Assumption
+```
+# Calculating Sample (Empirical) Variogram 
+```{r}
+# Ozone Concentration Sample Variogram
+ozone.vgm <- variogram(logArith ~ 1, ozone_data_unique)
+
+# NO2 Concentration Sample Variogram
+no2.vgm <- variogram(logArith ~ 1, no2_data_unique)
+
+# PM 2.5 Concentration Sample Variogram
+pm25.vgm <- variogram(Arithmetic ~ 1, pm25_data_unique)
+
+plot(ozone.vgm, main = "Sample Variogram of Log (Ozone Concentration)")
+plot(no2.vgm, main = "Sample Variogram of Log(NO2 Concentration)")
+plot(pm25.vgm, main = "Sample Variogram of PM 2.5 Concentration")
+
+
+```
+
+# List of Possible Variogram Models
+```{r}
+show.vgms()
+
+# List of semivariance value 
+SampleOzoneSemiVar <- ozone.vgm$gamma
+SampleNO2SemiVar <- no2.vgm$gamma
+SamplePM25SemiVar <- pm25.vgm$gamma
+
+print("-----------Ozone Semivariance----------")
+print(SampleOzoneSemiVar)
+print("------------NO2 Semivaraince-----------")
+print(SampleNO2SemiVar)
+print("----------PM 2.5 Semivariance----------")
+print(SamplePM25SemiVar)
+
+# Sample Ozone Variogram would fit for "Nug" or "Per" or "Hol"
+# Sample NO2 Variogram would fit for "Gau"
+# Sample PM 2.5 Variogram would fit for "Wav" or "Per"
+```
+
+# Fitting Possible Variograms
+```{r}
+# Ozone Variogram of "Per", "Hol"
+ozonePer.fit <- fit.variogram(ozone.vgm, model = vgm("Per"))
+ozoneHol.fit <- fit.variogram(ozone.vgm, model = vgm("Hol"))
+
+# NO2 Variogram of "Per", "Gau"
+no2Per.fit <- fit.variogram(no2.vgm, model = vgm("Per"))
+no2Gau.fit <- fit.variogram(no2.vgm, model = vgm("Gau"))
+
+# PM 2.5 Variogram of "Per", "Wav"
+pm25Per.fit <- fit.variogram(pm25.vgm, model = vgm("Per"))
+pm25Wav.fit <- fit.variogram(pm25.vgm, model = vgm("Wav"))
+```
+
+# Plotting each Possible Fit
+```{r}
+# Ozone Possible Variogram Fit Plot
+plot(ozone.vgm, ozonePer.fit, main = "Ozone (Per)")
+plot(ozone.vgm, ozoneHol.fit, main = "Ozone (Hol)") # Best represents
+
+# NO2 Possible Variogram Fit Plot
+plot(no2.vgm, no2Per.fit, main = "NO2 (Per)")
+plot(no2.vgm, no2Gau.fit, main = "NO2 (Gau)") # Best represents
+
+# PM 2.5 Possible Variogram Fit Plot
+plot(pm25.vgm, pm25Per.fit, main = "PM 2.5 (Per)")
+plot(pm25.vgm, pm25Wav.fit, main = "PM 2.5 (Wav)") # Best represents
+```
+
+# Model Parameter Specifications
+```{r}
+# vgm(0.001009458, "Hol", 158.1515)
+ozoneHol.fit # psill: 0.001009458	, range: 158.1515	 
+
+# vgm(0.7650246, "Gau",104.2188)
+no2Gau.fit # psill: 0.7650246	, range: 104.2188	
+
+# vgm(3.000621, "Wav", 213.0957)
+pm25Wav.fit # psill: 3.000621 , range: 213.0957
+
+LOOCV_krige_ozone <- krige.cv(logArith ~ 1, 
+                        ozone_data_unique, 
+                        model = ozoneHol.fit)
+
+LOOCV_krige_no2 <- krige.cv(logArith ~ 1, 
+                        no2_data_unique, 
+                        model = no2Gau.fit)
+
+LOOCV_krige_pm25 <- krige.cv(Arithmetic ~ 1, 
+                        pm25_data_unique, 
+                        model = pm25Wav.fit)
+
+LOOCVKrigOzoneResid <- LOOCV_krige_ozone@data$residual
+LOOCVKrigNO2Resid <- LOOCV_krige_no2@data$residual
+LOOCVKrigPM25Resid <-LOOCV_krige_pm25@data$residual
+
+RMSE_resid(LOOCVKrigOzoneResid)
+RMSE_resid(LOOCVKrigNO2Resid)
+RMSE_resid(LOOCVKrigPM25Resid)
+
+options(scipen=999)
+attr(ozoneHol.fit, "SSErr")
+attr(no2Gau.fit, "SSErr")
+attr(pm25Wav.fit, "SSErr")
+```
+
+# Creating a convex hull
+```{r}
+# Row IDs of points for convex hull
+convex_hull_point_ids_ozone <- ozone_data_unique@coords %>%
+  chull()
+
+convex_hull_point_ids_no2 <- no2_data_unique@coords %>%
+  chull()
+
+convex_hull_point_ids_pm25 <- pm25_data_unique@coords %>%
+  chull()
+
+# Sub-setting the points for convex hull and convert to data frame
+convex_hull_points_ozone <- ozone_data_unique@coords[convex_hull_point_ids_ozone,] %>%
+  as.data.frame()
+
+convex_hull_points_no2 <- no2_data_unique@coords[convex_hull_point_ids_no2,] %>%
+  as.data.frame()
+
+convex_hull_points_pm25 <- pm25_data_unique@coords[convex_hull_point_ids_pm25,] %>%
+  as.data.frame()
+
+# Plotting convex hull points for each air pollutant
+plot(convex_hull_points_ozone)
+plot(convex_hull_point_ids_no2)
+plot(convex_hull_point_ids_pm25)
+```
+
+# Creating a Polygon from the Convex Hull Points
+```{r}
+# Creating a matrix of the convex hull point coordinates
+coordsOzone <- coordinates(convex_hull_points_ozone)
+coordsNO2 <- coordinates(convex_hull_points_no2)
+coordsPM25 <- coordinates(convex_hull_points_pm25)
+
+# Creating a Polygon
+polyOzone <- sp::Polygon(coordsOzone)
+polyNO2 <- sp::Polygon(coordsNO2)
+polyPM25 <- sp:: Polygon(coordsPM25)
+
+# Preparing data for a "sp" object
+ID <- "Minimum Boundary"
+PlsOzone <- Polygons(list(polyOzone), ID = ID)
+PlsNO2 <- Polygons(list(polyNO2), ID = ID)
+PlsPM25 <- Polygons(list(polyPM25), ID = ID)
+
+SPlsOzone <- SpatialPolygons(list(PlsOzone))
+SPlsNO2 <-SpatialPolygons(list(PlsNO2))
+SPlsPM25 <- SpatialPolygons(list(PlsPM25))
+
+plot(SPlsOzone)
+plot(SPlsNO2)
+plot(SPlsPM25)
+```
+
+# Creating evenly spaced grid
+```{r}
+gridOzone <- makegrid(SPlsOzone, cellsize = 0.1)
+gridNO2 <- makegrid(SPlsNO2, cellsize = 0.1)
+gridPM25 <- makegrid(SPlsPM25, cellsize = 0.1)
+
+coordinates(gridOzone) <- ~ x1+x2
+coordinates(gridNO2) <- ~ x1+x2
+coordinates(gridPM25) <- ~ x1+x2
+
+plot(gridOzone)
+plot(gridNO2)
+plot(gridPM25)
+```
+
+# Selecting only grid points within convex hull
+```{r}
+# Checking which grid cells are in the polygon
+grid_in_poly_ozone <- sp::over(gridOzone, SPlsOzone)
+grid_in_poly_no2 <- sp::over(gridNO2, SPlsNO2)
+grid_in_poly_pm25 <- sp::over(gridPM25, SPlsPM25)
+
+# List of NAs and valid grid cells
+grid_in_poly_ozone
+grid_in_poly_no2
+grid_in_poly_pm25
+
+# Selecting only points that are not NA 
+grid_predict_ozone <- gridOzone[!is.na(grid_in_poly_ozone),]
+grid_predict_no2 <- gridNO2[!is.na(grid_in_poly_no2),]
+grid_predict_pm25 <- gridPM25[!is.na(grid_in_poly_pm25),]
+
+# Plotting
+plot(grid_predict_ozone)
+plot(grid_predict_no2)
+plot(grid_predict_pm25)
+```
+
+# Predicting Air Pollutant Concentration Values at New Points 
+```{r}
+# Setting CRS of grid_predict's of every air pollutants to the spatial data set
+crs(grid_predict_ozone) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+crs(grid_predict_no2) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+crs(grid_predict_pm25) <- CRS("+proj=longlat +datum=WGS84 +no_defs")
+
+# Kriging of Ozone Concentration over Grid Cells
+ozone_krige <- krige(log(Arithmetic) ~ 1,
+                        ozone_data_unique,
+                        grid_predict_ozone,
+                        model = ozoneHol.fit)
+
+# Kriging of NO2 Concentration over Grid Cells
+no2_krige <- krige(log(Arithmetic) ~ 1,
+                        no2_data_unique,
+                        grid_predict_no2,
+                        model = no2Gau.fit)
+
+# Kriging of PM 2.5 Concentration over Grid Cells
+pm25_krige <- krige(Arithmetic ~ 1,
+                        pm25_data_unique,
+                        grid_predict_pm25,
+                        model = pm25Wav.fit)
+```
+
+# Plotting Air Pollutant Concentration Predictions
+```{r}
+# Exponential-transformation of Log(Ozone) back to original scale
+ozone_krige_copy <- ozone_krige
+ozone_krige_copy@data$Pred <- exp(ozone_krige@data$var1.pred)
+
+# Exponential-transformation of Log(NO2) back to original scale
+no2_krige_copy <- no2_krige
+no2_krige_copy@data$Pred <- exp(no2_krige@data$var1.pred)
+
+# Plotting the original scale of Kriging Prediction Air Pollutant Concentrations
+KrigOzonePlot <- spplot(ozone_krige_copy, "Pred", main="Kriging of Ozone",
+                         sp.layout = list(list(States, fill=alpha("white", 0.01), lwd=2, first=FALSE)))
+
+KrigNO2Plot <- spplot(no2_krige_copy, "Pred", main = "Kriging of NO2",
+                      sp.layout = list(list(States, fill=alpha("white", 0.01), lwd=2, first=FALSE)))
+
+KrigPM25Plot <- spplot(pm25_krige, "var1.pred", main = "Kriging of PM 2.5",
+                       sp.layout = list(list(States, fill=alpha("white", 0.01), lwd=2, first=FALSE)))
+grid.arrange(KrigOzonePlot, KrigNO2Plot, KrigPM25Plot, ncol = 3)
+```
